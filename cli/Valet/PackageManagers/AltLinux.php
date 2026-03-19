@@ -8,7 +8,7 @@ use Valet\CommandLine;
 use Valet\Contracts\PackageManager;
 use Valet\Contracts\ServiceManager;
 
-class Apt implements PackageManager
+class AltLinux implements PackageManager
 {
     /**
      * @var CommandLine
@@ -21,17 +21,22 @@ class Apt implements PackageManager
 
     private const PACKAGES = [
         'redis' => 'redis-server',
-        'mysql' => 'mysql-server',
+        'mysql' => 'mariadb-server', // ALTLinux uses MariaDB by default
         'mariadb' => 'mariadb-server',
     ];
 
     /**
      * @var array
      */
-    public const PHP_FPM_PATTERN_BY_VERSION = [];
+    public const PHP_FPM_PATTERN_BY_VERSION = [
+        '8.1' => 'php8.1-fpm-fcgi',
+        '8.2' => 'php8.2-fpm-fcgi',
+        '8.3' => 'php8.3-fpm-fcgi',
+        '8.4' => 'php8.4-fpm-fcgi',
+    ];
 
     /**
-     * Create a new Apt instance.
+     * Create a new AltLinux instance.
      */
     public function __construct(CommandLine $cli, ServiceManager $serviceManager)
     {
@@ -44,7 +49,7 @@ class Apt implements PackageManager
      */
     public function packages(string $package): array
     {
-        $query = "dpkg -l {$package} | grep '^ii' | sed 's/\s\+/ /g' | cut -d' ' -f2";
+        $query = "rpm -qa {$package} | sort";
 
         return explode(PHP_EOL, $this->cli->run($query));
     }
@@ -54,7 +59,15 @@ class Apt implements PackageManager
      */
     public function installed(string $package): bool
     {
-        return in_array($package, $this->packages($package));
+        $packages = $this->packages($package);
+
+        foreach ($packages as $installedPackage) {
+            if (strpos($installedPackage, $package) !== false) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -74,10 +87,10 @@ class Apt implements PackageManager
     {
         Writer::twoColumnDetail($package, 'Installing');
 
-        $this->cli->run(trim('apt-get install -y '.$package), function ($exitCode, $errorOutput) use ($package) {
+        $this->cli->run(trim('apt-get install -y ' . $package), function ($exitCode, $errorOutput) use ($package) {
             Writer::error(\sprintf('%s: %s', $exitCode, $errorOutput));
 
-            throw new DomainException('Apt was unable to install ['.$package.'].');
+            throw new DomainException('Apt was unable to install [' . $package . '].');
         });
     }
 
@@ -99,7 +112,16 @@ class Apt implements PackageManager
                 throw new DomainException('Apt not available');
             });
 
-            return $output != '';
+            // Check if this is ALTLinux by checking /etc/os-release
+            $osRelease = $this->cli->run('cat /etc/os-release 2>/dev/null', function () {
+                return '';
+            });
+
+            if ($output != '' && strpos($osRelease, 'ID=altlinux') !== false) {
+                return true;
+            }
+
+            return false;
         } catch (DomainException $e) {
             return false;
         }
@@ -111,7 +133,7 @@ class Apt implements PackageManager
     public function getPhpFpmName(string $version): string
     {
         $pattern = !empty(self::PHP_FPM_PATTERN_BY_VERSION[$version])
-            ? self::PHP_FPM_PATTERN_BY_VERSION[$version] : 'php{VERSION}-fpm';
+            ? self::PHP_FPM_PATTERN_BY_VERSION[$version] : 'php{VERSION}-fpm-fcgi';
 
         return str_replace('{VERSION}', $version, $pattern);
     }
@@ -121,7 +143,7 @@ class Apt implements PackageManager
      */
     public function getPhpFpmServiceName(string $version): string
     {
-        return $this->getPhpFpmName($version);
+        return 'php' . $version . '-fpm';
     }
 
     /**
@@ -129,7 +151,7 @@ class Apt implements PackageManager
      */
     public function getCaCertificatesPath(): string
     {
-        return '/usr/share/ca-certificates';
+        return '/etc/pki/ca-trust/extracted/pem';
     }
 
     /**
@@ -137,7 +159,7 @@ class Apt implements PackageManager
      */
     public function getPhpExtensionPrefix(string $version): string
     {
-        $pattern = 'php{VERSION}-';
+        $pattern = 'php{VERSION}';
         return str_replace('{VERSION}', $version, $pattern);
     }
 
@@ -146,11 +168,15 @@ class Apt implements PackageManager
      */
     public function getPhpExtensionName(string $version, string $extension): string
     {
-        return $this->getPhpExtensionPrefix($version) . $extension;
+        // Special case for mysql in ALTLinux
+        if ($extension === 'mysql') {
+            return 'php' . $version . '-mysqlnd';
+        }
+        return $this->getPhpExtensionPrefix($version) . '-' . $extension;
     }
 
     /**
-     * Restart dnsmasq in Ubuntu.
+     * Restart network manager in ALTLinux.
      */
     public function restartNetworkManager(): void
     {
